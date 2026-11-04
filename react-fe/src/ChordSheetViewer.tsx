@@ -82,7 +82,7 @@ interface StrumTimelineItem {
 export const ChordSheetViewer: React.FC = () => {
     const [rawText, setRawText] = useState(DEFAULT_CHORD_SHEET.trim());
     const [transposeDelta, setTransposeDelta] = useState(0);
-    const [fontSize, setFontSize] = useState(15);
+    const [fontSize] = useState(15);
 
     // Playback States
     const [isPlaying, setIsPlaying] = useState(false);
@@ -295,8 +295,7 @@ export const ChordSheetViewer: React.FC = () => {
         const prefix = text.slice(0, currentWordCol);
         const suffix = text.slice(currentWordCol);
         const parts = prefix.split(/(\s+)/); // Keeps words and whitespace chunks
-        const spaceIndices = parts.map((p, i) => i).filter((i) => /^\s+$/.test(parts[i]));
-
+        const spaceIndices = parts.map((_, i) => i).filter((i) => /^\s+$/.test(parts[i]));
         if (spaceIndices.length === 0) {
             return " ".repeat(diff) + text;
         }
@@ -765,7 +764,7 @@ export const ChordSheetViewer: React.FC = () => {
                             if (item.type === "strum") {
                                 return (
                                     <div key={idx} className="sheet-line inline-strum-line">
-                                        {item.elements!.map((elem, eIdx) => {
+                                        {item.elements!.map((elem: any, eIdx: number) => {
                                             if (!elem.isStroke) return elem.char;
 
                                             const isActive = elem.strokeId === activeGlobalStrokeId;
