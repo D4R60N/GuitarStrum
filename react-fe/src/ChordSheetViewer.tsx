@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useRef, useEffect } from "react";
+import { Metronome } from "./Metronome";
 import ChordSheetJS from "chordsheetjs";
 const STRING_FREQS = [82.41, 110.0, 146.83, 196.0, 246.94, 329.63];
 const DEFAULT_CHORD_SHEET = `Capo 3rd fret
@@ -35,17 +36,21 @@ s:                   D - D U - U D -`;
 
 const CHORD_TOKEN_REGEX = /\b([A-G][b#]?(?:maj|min|m|M|sus|dim|aug|add)?[0-9]*(?:\/[A-G][b#]?)?)\b|N\.C\./g;
 
-// SVG Chord Box Component
 const CHORD_DB: Record<string, number[]> = {
     C: [-1, 3, 2, 0, 1, 0],
-    G: [3, 2, 0, 0, 3, 3],
-    Am: [-1, 0, 2, 2, 1, 0],
-    F: [1, 3, 3, 2, 1, 1],
     D: [-1, -1, 0, 2, 3, 2],
+    E: [0, 2, 2, 1, 0, 0],
+    F: [1, 3, 3, 2, 1, 1],
+    G: [3, 2, 0, 0, 3, 3],
+    A: [-1, 0, 2, 2, 2, 0],
+    B: [-1, 2, 4, 4, 4, 2],
+    Cm: [-1, 3, 5, 5, 4, 3],
     Dm: [-1, -1, 0, 2, 3, 1],
     Em: [0, 2, 2, 0, 0, 0],
-    E: [0, 2, 2, 1, 0, 0],
-    A: [-1, 0, 2, 2, 2, 0],
+    Fm: [1, 3, 3, 1, 1, 1],
+    Gm: [3, 5, 5, 3, 3, 3],
+    Am: [-1, 0, 2, 2, 1, 0],
+    Bm: [-1, 2, 4, 4, 3, 2],
 };
 
 const ChordBox = ({ chord }: { chord: string }) => {
@@ -77,6 +82,8 @@ interface StrumTimelineItem {
     stroke: string; // "D", "U", "X", "-"
     tempo: number;  // Current road-sign tempo at this stroke
     chord?: string;
+    capo?: number;
+    pauseDurationMs?: number;
 }
 
 export const ChordSheetViewer: React.FC = () => {
@@ -93,6 +100,8 @@ export const ChordSheetViewer: React.FC = () => {
     const [activeHeaderPattern, setActiveHeaderPattern] = useState<string | null>(null);
     const [activeHeaderStroke, setActiveHeaderStroke] = useState<number | null>(null);
     const headerIntervalRef = useRef<number | null>(null);
+    const countdownIntervalRef = useRef<number | null>(null);
+    const lastScrolledLineRef = useRef<Element | null>(null);
 
     // Parse top Strumming cards: Strumming (Verse - 75 bpm): D - D -
     const headerPatterns = useMemo(() => {
@@ -221,7 +230,7 @@ export const ChordSheetViewer: React.FC = () => {
         osc.stop(ctx.currentTime + 0.06);
     };
 
-    const playGuitarStrum = (chordName: string | undefined, stroke: string) => {
+    const playGuitarStrum = (chordName: string | undefined, stroke: string, delta: number = 0) => {
         if (isMuted || !chordName || stroke === "-") return;
 
         if (!audioCtxRef.current) {
@@ -230,7 +239,7 @@ export const ChordSheetViewer: React.FC = () => {
         const ctx = audioCtxRef.current;
         if (ctx.state === "suspended") ctx.resume();
 
-        // Muted string "thud" for X
+        // Muted string thud for "X"
         if (stroke === "X") {
             playClick(300);
             return;
@@ -240,20 +249,23 @@ export const ChordSheetViewer: React.FC = () => {
         const isDown = stroke === "D";
         const now = ctx.currentTime;
 
+        // Pitch multiplier: 2^(semitones / 12)
+        const pitchMultiplier = Math.pow(2, delta / 12);
+
         frets.forEach((fret, stringIdx) => {
             if (fret === -1) return; // Muted string
 
-            // Frequency = BaseFreq * 2^(fret / 12)
-            const freq = STRING_FREQS[stringIdx] * Math.pow(2, fret / 12);
+            // Base string frequency shifted by fret AND transposeDelta
+            const freq = STRING_FREQS[stringIdx] * Math.pow(2, fret / 12) * pitchMultiplier;
 
-            // Strum roll delay: 10ms between strings (low to high for D, high to low for U)
+            // Strum roll delay: 10ms between strings (down vs up)
             const delay = isDown ? stringIdx * 0.012 : (5 - stringIdx) * 0.012;
             const startTime = now + delay;
 
             const osc = ctx.createOscillator();
             const gain = ctx.createGain();
 
-            osc.type = "triangle"; // Sounds warm like an acoustic guitar string
+            osc.type = "triangle"; // Warm acoustic guitar tone
             osc.frequency.setValueAtTime(freq, startTime);
 
             // Acoustic string pluck envelope
@@ -317,6 +329,7 @@ export const ChordSheetViewer: React.FC = () => {
     const { timeline, lineStructures } = useMemo(() => {
         const lines = rawText.split("\n");
         let currentTempo = 90;
+        let currentCapo = 0;
         let strokeCounter = 0;
         const allStrokes: StrumTimelineItem[] = [];
         const structured: any[] = [];
@@ -329,6 +342,45 @@ export const ChordSheetViewer: React.FC = () => {
             if (tempoMatch) {
                 currentTempo = parseInt(tempoMatch[1], 10);
                 structured.push({ type: "tempo", tempo: currentTempo, text: `⏱ Tempo: ${currentTempo} BPM` });
+                continue;
+            }
+
+            const capoMatch = trimmed.match(/^\[?capo(?:\s*:|\s+)(\d+)(?:st|nd|rd|th)?(?:\s+fret)?\]?$/i);
+            if (capoMatch) {
+                currentCapo = parseInt(capoMatch[1], 10);
+                structured.push({
+                    type: "capo",
+                    capo: currentCapo,
+                    text: currentCapo > 0 ? `🎸 Capo ${currentCapo}${["st","nd","rd"][currentCapo-1] || "th"} fret` : "🎸 Capo: None",
+                });
+                continue;
+            }
+
+            const pauseMatch = trimmed.match(/^\[?pause(?:\s*:\s*([\d.]+)\s*(s|sec|b|beats?)?)?\]?$/i);
+            if (pauseMatch) {
+                const val = pauseMatch[1] ? parseFloat(pauseMatch[1]) : 4; // default 4 beats
+                const unit = (pauseMatch[2] || "b").toLowerCase();
+
+                // Calculate pause in milliseconds (seconds vs beats)
+                const durationMs = unit.startsWith("s")
+                    ? val * 1000
+                    : (val * (60 / currentTempo)) * 1000;
+
+                // Insert a silent pause event into the playback timeline
+                const strokeId = strokeCounter++;
+                allStrokes.push({
+                    id: strokeId,
+                    stroke: "PAUSE",
+                    tempo: currentTempo,
+                    capo: currentCapo,
+                    pauseDurationMs: durationMs,
+                });
+
+                structured.push({
+                    type: "pause",
+                    strokeId,
+                    text: `⏸ Pause: ${val}${unit.startsWith("s") ? "s" : " beats"}`,
+                });
                 continue;
             }
 
@@ -374,7 +426,7 @@ export const ChordSheetViewer: React.FC = () => {
                     }
                 }
 
-                // 2. Expand words for subsequent chord changes
+// 2. Two-way elastic alignment for subsequent chords
                 for (let i = 1; i < anchors.length; i++) {
                     const anchor = anchors[i];
                     if (prevChordLine && prevChordLine.text) {
@@ -383,9 +435,10 @@ export const ChordSheetViewer: React.FC = () => {
 
                         if (chordMatch && chordMatch.index !== undefined) {
                             const currentChordCol = chordMatch.index;
-                            const diff = anchor.targetCol - currentChordCol;
 
-                            if (diff > 0) {
+                            // CASE A: Strumming is wider than words -> Expand lyrics and chord line
+                            if (anchor.targetCol > currentChordCol) {
+                                const diff = anchor.targetCol - currentChordCol;
                                 prevChordLine.text =
                                     prevChordLine.text.slice(0, currentChordCol) +
                                     " ".repeat(diff) +
@@ -395,10 +448,26 @@ export const ChordSheetViewer: React.FC = () => {
                                     prevLyricLine.text = justifyText(prevLyricLine.text, anchor.targetCol, currentChordCol);
                                 }
                             }
+                            // CASE B: Words/Chords are wider than strumming -> Stretch the strumming line to reach the chord!
+                            else if (currentChordCol > anchor.targetCol) {
+                                const padCount = currentChordCol - anchor.targetCol;
+                                const padSpaces = " ".repeat(padCount);
+
+                                // Insert spaces into the strumming line right before this chord starts
+                                cleanContent =
+                                    cleanContent.slice(0, anchor.targetCol) +
+                                    padSpaces +
+                                    cleanContent.slice(anchor.targetCol);
+
+                                // Update this anchor and all subsequent anchor positions
+                                anchor.targetCol = currentChordCol;
+                                for (let j = i + 1; j < anchors.length; j++) {
+                                    anchors[j].targetCol += padCount;
+                                }
+                            }
                         }
                     }
                 }
-
                 // 3. Build playback strokes with active chord mapping
                 let activeChordForStrokes =
                     anchors[0]?.chord || prevChordLine?.text?.trim().split(/\s+/)[0] || "C";
@@ -421,7 +490,8 @@ export const ChordSheetViewer: React.FC = () => {
                             id: strokeId,
                             stroke: upper,
                             tempo: currentTempo,
-                            chord: activeChordForStrokes, // 👈 Saves the chord to this stroke
+                            chord: activeChordForStrokes,
+                            capo: currentCapo,
                         });
                         strokeElements.push({ char: upper, isStroke: true, strokeId });
                     } else {
@@ -464,47 +534,76 @@ export const ChordSheetViewer: React.FC = () => {
     // Stop Playback
     const stopPlayback = () => {
         if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+        if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+        lastScrolledLineRef.current = null;
         setIsPlaying(false);
         setCurrentCountdown(null);
         setActiveGlobalStrokeId(null);
     };
 
-    // Start Playback with Configurable Countdown
-    const startPlayback = () => {
-        if (isPlaying) {
+    // Start Playback from any stroke index (defaults to 0)
+    const startPlayback = (startStep: number = 0) => {
+        // If already playing or counting down, STOP!
+        if (isPlaying || currentCountdown !== null) {
             stopPlayback();
             return;
         }
-        if (timeline.length === 0) return;
 
+        // Ensure startStep is ALWAYS a number (never a React Event)
+        const validStep = typeof startStep === "number" ? startStep : 0;
+        if (timeline.length === 0 || validStep >= timeline.length) {
+            stopPlayback();
+            return;
+        }
+
+        stopPlayback(); // Clean reset
         setIsPlaying(true);
 
-        const initialTempo = timeline[0]?.tempo || 90;
+        const initialTempo = timeline[validStep]?.tempo || 90;
         const beatDurationMs = (60 / initialTempo) * 1000;
 
-        // Countdown routine
         let count = countdownBeats;
 
         if (count > 0) {
             setCurrentCountdown(count);
-            playClick(1000); // High click for countdown start
+            playClick(1000);
 
-            const countInterval = setInterval(() => {
+            countdownIntervalRef.current = window.setInterval(() => {
                 count--;
                 if (count > 0) {
                     setCurrentCountdown(count);
                     playClick(880);
                 } else {
-                    clearInterval(countInterval);
+                    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
                     setCurrentCountdown(null);
-                    playClick(1200); // "Go!" click
-                    runTimelineStep(0);
+                    playClick(1200);
+                    runTimelineStep(validStep);
                 }
             }, beatDurationMs);
         } else {
-            runTimelineStep(0);
+            runTimelineStep(validStep);
         }
     };
+
+    useEffect(() => {
+        if (activeGlobalStrokeId === null) {
+            lastScrolledLineRef.current = null;
+            return;
+        }
+
+        const activeEl = document.querySelector(".inline-stroke-box.active-stroke");
+        if (!activeEl) return;
+
+        // Find the current line container
+        const parentLine = activeEl.closest(".sheet-line");
+        if (parentLine && parentLine !== lastScrolledLineRef.current) {
+            lastScrolledLineRef.current = parentLine;
+            parentLine.scrollIntoView({
+                behavior: "smooth",
+                block: "center", // Keeps the active line comfortably in the vertical middle
+            });
+        }
+    }, [activeGlobalStrokeId]);
 
     const runTimelineStep = (stepIdx: number) => {
         if (stepIdx >= timeline.length) {
@@ -515,9 +614,16 @@ export const ChordSheetViewer: React.FC = () => {
         const currentStroke = timeline[stepIdx];
         setActiveGlobalStrokeId(currentStroke.id);
 
-        // 👈 Plays the synthesized guitar chord (transposed) instead of the click
-        const activeChord = transposeToken(currentStroke.chord || "", transposeDelta);
-        playGuitarStrum(activeChord, currentStroke.stroke);
+        if (currentStroke.stroke === "PAUSE") {
+            const waitTime = currentStroke.pauseDurationMs || 1000;
+            playbackTimeoutRef.current = window.setTimeout(() => {
+                runTimelineStep(stepIdx + 1);
+            }, waitTime);
+            return;
+        }
+
+        const totalPitchShift = (currentStroke.capo || 0) + transposeDelta;
+        playGuitarStrum(currentStroke.chord, currentStroke.stroke, totalPitchShift);
 
         // Dynamic tempo duration (8th note timing: half a beat)
         const strokeDurationMs = (60 / currentStroke.tempo / 2) * 1000;
@@ -591,9 +697,9 @@ export const ChordSheetViewer: React.FC = () => {
             >
                 {/* Play / Stop Button */}
                 <button
-                    onClick={startPlayback}
+                    onClick={() => (isPlaying || currentCountdown !== null ? stopPlayback() : startPlayback(0))}
                     style={{
-                        background: isPlaying ? "#e63946" : "#2a9d8f",
+                        background: isPlaying || currentCountdown !== null ? "#e63946" : "#2a9d8f",
                         color: "white",
                         padding: "6px 16px",
                         borderRadius: "4px",
@@ -602,7 +708,7 @@ export const ChordSheetViewer: React.FC = () => {
                         fontWeight: "bold",
                     }}
                 >
-                    {isPlaying ? "⏹ Stop" : "▶ Play Song"}
+                    {isPlaying || currentCountdown !== null ? "⏹ Stop" : "▶ Play Song"}
                 </button>
 
                 {/* Countdown Selector */}
@@ -667,7 +773,7 @@ export const ChordSheetViewer: React.FC = () => {
             </div>
 
             {/* Main Split View */}
-            <div style={{ display: "flex", flex: 1, overflow: "hidden", position: "relative" }}>
+            <div style={{ display: "flex", flex: 1, overflow: "hidden", position: "relative"}}>
                 {/* Countdown Floating Banner */}
                 {currentCountdown !== null && (
                     <div className="countdown-overlay">
@@ -704,6 +810,10 @@ export const ChordSheetViewer: React.FC = () => {
 
                 {/* Formatted Sheet (Right) */}
                 <div style={{ flex: 1, padding: "2rem", overflowY: "auto", overflowX: "auto", background: "#ffffff" }}>
+                    {/* Top Bar: Metronome & Strumming Cards */}
+                    <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", alignItems: "flex-start", marginBottom: "1.2rem" }}>
+                        <Metronome initialBpm={85} isMuted={isMuted} />
+                    </div>
                     {/* Chord Boxes Header */}
                     {uniqueChords.length > 0 && (
                         <div className="chords-diagram-bar">
@@ -723,6 +833,25 @@ export const ChordSheetViewer: React.FC = () => {
                             if (item.type === "tempo") {
                                 return (
                                     <div key={idx} className="tempo-road-sign">
+                                        {item.text}
+                                    </div>
+                                );
+                            }
+                            if (item.type === "capo") {
+                                return (
+                                    <div key={idx} className="capo-road-sign">
+                                        {item.text}
+                                    </div>
+                                );
+                            }
+                            if (item.type === "pause") {
+                                const isActive = item.strokeId === activeGlobalStrokeId;
+                                return (
+                                    <div
+                                        key={idx}
+                                        onClick={() => startPlayback(item.strokeId)}
+                                        className={`pause-road-sign ${isActive ? "active-pause" : ""}`}
+                                    >
                                         {item.text}
                                     </div>
                                 );
@@ -776,6 +905,8 @@ export const ChordSheetViewer: React.FC = () => {
                                             return (
                                                 <span
                                                     key={eIdx}
+                                                    onClick={() => elem.strokeId !== undefined && startPlayback(elem.strokeId)}
+                                                    title="Click to play from here"
                                                     className={`inline-stroke-box ${isActive ? "active-stroke" : ""}`}
                                                 >
                           {label}
@@ -946,6 +1077,56 @@ export const ChordSheetViewer: React.FC = () => {
           color: #1e40af !important;
           box-shadow: 0 0 0 2px #dbeafe !important;
           font-size: 0.85em;
+        }
+        .inline-stroke-box {
+          display: inline-block;
+          font-weight: bold;
+          color: #3a86ff;
+          cursor: pointer;
+          border-radius: 2px;
+          padding: 0 1px;
+          transition: all 0.1s ease-out;
+        }
+
+        /* Hover effect so you know it's clickable */
+        .inline-stroke-box:hover {
+          background-color: #e0e7ff;
+          color: #1d4ed8;
+          transform: scale(1.3);
+        }
+        .capo-road-sign {
+          display: inline-block;
+          background: #e0f2fe;
+          color: #0369a1;
+          font-weight: bold;
+          font-size: 0.85em;
+          padding: 3px 8px;
+          border-radius: 4px;
+          margin-top: 1em;
+          margin-bottom: 0.2em;
+          border: 1px dashed #7dd3fc;
+        }
+        .pause-road-sign {
+          display: inline-block;
+          background: #f3f4f6;
+          color: #4b5563;
+          font-weight: bold;
+          font-size: 0.85em;
+          padding: 3px 8px;
+          border-radius: 4px;
+          margin-top: 1em;
+          margin-bottom: 0.2em;
+          border: 1px dashed #9ca3af;
+          cursor: pointer;
+          transition: all 0.15s ease-out;
+        }
+
+        .pause-road-sign.active-pause {
+          background: #ffbe0b !important;
+          color: #000 !important;
+          border-color: #d97706 !important;
+          transform: scale(1.1);
+          box-shadow: 0 0 8px rgba(255, 190, 11, 0.7);
         }
       `}</style>
         </div>
